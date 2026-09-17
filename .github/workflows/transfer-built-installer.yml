@@ -68,7 +68,7 @@ jobs:
           INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
         run: |
           python3 - <<'PY'
-          import os,json,subprocess,http.client,time
+          import os,json,subprocess
           name=f"KWAK-Studio-{os.environ['VERSION']}-{os.environ['PLATFORM']}"
           repo=os.environ['GH_REPO']; tag='v'+os.environ['VERSION']; digest='sha256:'+os.environ['INSTALLER_SHA256']
           def gh(*args): return subprocess.check_output(['gh',*args],text=True)
@@ -84,19 +84,12 @@ jobs:
           if existing:
               assert existing['state']=='starter','Unknown asset state'
               gh('api','--method','DELETE',f"repos/{repo}/releases/assets/{existing['id']}")
-          connection=http.client.HTTPSConnection('uploads.github.com',timeout=90)
-          connection.putrequest('POST',f'/repos/{repo}/releases/{release_id}/assets?name={name}')
-          for key,value in {'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/octet-stream','Content-Length':str(os.path.getsize(name)),'Accept':'application/vnd.github+json'}.items(): connection.putheader(key,value)
-          connection.endheaders()
-          sent=0; next_report=8*1024*1024; began=time.monotonic()
-          with open(name,'rb') as source:
-              while block:=source.read(64*1024):
-                  connection.send(block); sent+=len(block)
-                  if sent>=next_report:
-                      print(f'Sent {sent//1048576} MiB / {os.path.getsize(name)//1048576} MiB in {time.monotonic()-began:.0f}s',flush=True)
-                      next_report+=8*1024*1024
-          response=connection.getresponse(); uploaded=json.load(response)
-          assert response.status==201,'Upload request rejected'
+          token=os.environ['GH_TOKEN']
+          config='header = "Authorization: Bearer '+token.replace('\\','\\\\').replace('"','\\"')+'"\n'
+          result=subprocess.run(['curl','--http2','--request','POST','--upload-file',name,'--header','Content-Type: application/octet-stream','--header','Expect:','--config','-','--fail-with-body','--connect-timeout','30','--max-time','600','--progress-bar','--output','upload-response.json','--write-out','HTTP %{http_code}; sent %{size_upload}; speed %{speed_upload}; elapsed %{time_total}\n',f'https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={name}'],input=config,text=True,timeout=660)
+          if result.returncode!=0:
+              raise SystemExit('Installer transfer failed with curl code '+str(result.returncode))
+          uploaded=json.load(open('upload-response.json'))
           assert uploaded['state']=='uploaded' and uploaded.get('digest')==digest,'Upload response differs'
           assets=json.loads(gh('api',f"repos/{repo}/releases/{release['id']}/assets"))
           actual=next(a for a in assets if a['name']==name)
