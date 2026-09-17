@@ -5,6 +5,9 @@ on:
       version:
         required: true
         type: string
+      release_id:
+        required: true
+        type: string
       platform:
         required: true
         type: choice
@@ -59,6 +62,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
           VERSION: ${{ inputs.version }}
           PLATFORM: ${{ inputs.platform }}
           INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
@@ -68,7 +72,9 @@ jobs:
           name=f"KWAK-Studio-{os.environ['VERSION']}-{os.environ['PLATFORM']}"
           repo=os.environ['GH_REPO']; tag='v'+os.environ['VERSION']; digest='sha256:'+os.environ['INSTALLER_SHA256']
           def gh(*args): return subprocess.check_output(['gh',*args],text=True)
-          release=json.loads(gh('api',f'repos/{repo}/releases/tags/{tag}'))
+          release_id=os.environ['RELEASE_ID']; assert release_id.isdigit()
+          release=json.loads(gh('api',f'repos/{repo}/releases/{release_id}'))
+          assert release['tag_name']==tag,'Release version mismatch'
           assert release['draft'],'Only an existing unpublished draft may receive an installer'
           existing=next((a for a in release['assets'] if a['name']==name),None)
           if existing and existing['state']=='uploaded':
@@ -78,7 +84,7 @@ jobs:
           if existing:
               assert existing['state']=='starter','Unknown asset state'
               gh('api','--method','DELETE',f"repos/{repo}/releases/assets/{existing['id']}")
-          gh('release','upload',tag,name,'--repo',repo)
+          gh('api','--method','POST','--hostname','uploads.github.com',f'repos/{repo}/releases/{release_id}/assets?name={name}','-H','Content-Type: application/octet-stream','--input',name)
           assets=json.loads(gh('api',f"repos/{repo}/releases/{release['id']}/assets"))
           actual=next(a for a in assets if a['name']==name)
           assert actual['state']=='uploaded' and actual.get('digest')==digest,'Remote installer not verified'
