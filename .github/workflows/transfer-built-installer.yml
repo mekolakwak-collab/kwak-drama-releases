@@ -23,7 +23,7 @@ permissions:
 jobs:
   transfer:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Download and verify the already built installer
         env:
@@ -68,7 +68,7 @@ jobs:
           INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
         run: |
           python3 - <<'PY'
-          import os,json,subprocess,urllib.request
+          import os,json,subprocess,http.client,time
           name=f"KWAK-Studio-{os.environ['VERSION']}-{os.environ['PLATFORM']}"
           repo=os.environ['GH_REPO']; tag='v'+os.environ['VERSION']; digest='sha256:'+os.environ['INSTALLER_SHA256']
           def gh(*args): return subprocess.check_output(['gh',*args],text=True)
@@ -84,9 +84,19 @@ jobs:
           if existing:
               assert existing['state']=='starter','Unknown asset state'
               gh('api','--method','DELETE',f"repos/{repo}/releases/assets/{existing['id']}")
-          req=urllib.request.Request(f'https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={name}',data=open(name,'rb').read(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/octet-stream','Accept':'application/vnd.github+json'},method='POST')
-          with urllib.request.urlopen(req,timeout=180) as response:
-              uploaded=json.load(response)
+          connection=http.client.HTTPSConnection('uploads.github.com',timeout=90)
+          connection.putrequest('POST',f'/repos/{repo}/releases/{release_id}/assets?name={name}')
+          for key,value in {'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/octet-stream','Content-Length':str(os.path.getsize(name)),'Accept':'application/vnd.github+json'}.items(): connection.putheader(key,value)
+          connection.endheaders()
+          sent=0; next_report=8*1024*1024; began=time.monotonic()
+          with open(name,'rb') as source:
+              while block:=source.read(64*1024):
+                  connection.send(block); sent+=len(block)
+                  if sent>=next_report:
+                      print(f'Sent {sent//1048576} MiB / {os.path.getsize(name)//1048576} MiB in {time.monotonic()-began:.0f}s',flush=True)
+                      next_report+=8*1024*1024
+          response=connection.getresponse(); uploaded=json.load(response)
+          assert response.status==201,'Upload request rejected'
           assert uploaded['state']=='uploaded' and uploaded.get('digest')==digest,'Upload response differs'
           assets=json.loads(gh('api',f"repos/{repo}/releases/{release['id']}/assets"))
           actual=next(a for a in assets if a['name']==name)
