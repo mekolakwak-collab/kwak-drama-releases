@@ -68,7 +68,7 @@ jobs:
           INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
         run: |
           python3 - <<'PY'
-          import os,json,subprocess
+          import os,json,subprocess,urllib.request
           name=f"KWAK-Studio-{os.environ['VERSION']}-{os.environ['PLATFORM']}"
           repo=os.environ['GH_REPO']; tag='v'+os.environ['VERSION']; digest='sha256:'+os.environ['INSTALLER_SHA256']
           def gh(*args): return subprocess.check_output(['gh',*args],text=True)
@@ -84,7 +84,10 @@ jobs:
           if existing:
               assert existing['state']=='starter','Unknown asset state'
               gh('api','--method','DELETE',f"repos/{repo}/releases/assets/{existing['id']}")
-          gh('api','--method','POST','--hostname','uploads.github.com',f'repos/{repo}/releases/{release_id}/assets?name={name}','-H','Content-Type: application/octet-stream','--input',name)
+          req=urllib.request.Request(f'https://uploads.github.com/repos/{repo}/releases/{release_id}/assets?name={name}',data=open(name,'rb').read(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/octet-stream','Accept':'application/vnd.github+json'},method='POST')
+          with urllib.request.urlopen(req,timeout=180) as response:
+              uploaded=json.load(response)
+          assert uploaded['state']=='uploaded' and uploaded.get('digest')==digest,'Upload response differs'
           assets=json.loads(gh('api',f"repos/{repo}/releases/{release['id']}/assets"))
           actual=next(a for a in assets if a['name']==name)
           assert actual['state']=='uploaded' and actual.get('digest')==digest,'Remote installer not verified'
