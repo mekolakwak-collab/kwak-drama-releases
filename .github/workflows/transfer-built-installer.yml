@@ -1,0 +1,86 @@
+name: Transfer verified built installer
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+      platform:
+        required: true
+        type: choice
+        options: [mac-universal.zip, win-x64.exe]
+      artifact_sha256:
+        required: true
+        type: string
+      installer_sha256:
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify the already built installer
+        env:
+          ARTIFACT_URL: ${{ secrets.BUILT_INSTALLER_ARTIFACT_URL }}
+          VERSION: ${{ inputs.version }}
+          PLATFORM: ${{ inputs.platform }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+          INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import os, re, hashlib, urllib.request, zipfile
+          from pathlib import Path
+          version=os.environ['VERSION']; platform=os.environ['PLATFORM']
+          assert re.fullmatch(r'\d+\.\d+\.\d+',version)
+          assert platform in ('mac-universal.zip','win-x64.exe')
+          assert all(re.fullmatch(r'[a-f0-9]{64}',os.environ[k]) for k in ('ARTIFACT_SHA256','INSTALLER_SHA256'))
+          url=os.environ['ARTIFACT_URL']
+          host=urllib.parse.urlparse(url).hostname or ''
+          assert host.endswith('.blob.core.windows.net') or host.endswith('.actions.githubusercontent.com')
+          try:
+              with urllib.request.urlopen(url,timeout=120) as source,open('artifact.zip','wb') as dest:
+                  while block:=source.read(1024*1024): dest.write(block)
+          except Exception:
+              raise SystemExit('Temporary artifact transfer failed; refresh the expiring artifact URL')
+          assert hashlib.file_digest(open('artifact.zip','rb'),'sha256').hexdigest()==os.environ['ARTIFACT_SHA256'],'Artifact digest differs'
+          name=f'KWAK-Studio-{version}-{platform}'
+          with zipfile.ZipFile('artifact.zip') as z:
+              entries=[entry for entry in z.infolist() if Path(entry.filename).name==name and not entry.is_dir()]
+              assert len(entries)==1,'Expected exactly one installer'
+              with z.open(entries[0]) as source,open(name,'wb') as dest:
+                  while block:=source.read(1024*1024): dest.write(block)
+          assert hashlib.file_digest(open(name,'rb'),'sha256').hexdigest()==os.environ['INSTALLER_SHA256'],'Installer differs from signed local candidate'
+          print('Verified installer bytes against the signed candidate:',name)
+          PY
+      - name: Transfer to the existing draft only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ inputs.version }}
+          PLATFORM: ${{ inputs.platform }}
+          INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import os,json,subprocess
+          name=f"KWAK-Studio-{os.environ['VERSION']}-{os.environ['PLATFORM']}"
+          repo=os.environ['GH_REPO']; tag='v'+os.environ['VERSION']; digest='sha256:'+os.environ['INSTALLER_SHA256']
+          def gh(*args): return subprocess.check_output(['gh',*args],text=True)
+          release=json.loads(gh('api',f'repos/{repo}/releases/tags/{tag}'))
+          assert release['draft'],'Only an existing unpublished draft may receive an installer'
+          existing=next((a for a in release['assets'] if a['name']==name),None)
+          if existing and existing['state']=='uploaded':
+              assert existing.get('digest')==digest,'Existing installer differs; do not overwrite'
+              print('Matching installer was already uploaded')
+              raise SystemExit(0)
+          if existing:
+              assert existing['state']=='starter','Unknown asset state'
+              gh('api','--method','DELETE',f"repos/{repo}/releases/assets/{existing['id']}")
+          gh('release','upload',tag,name,'--repo',repo)
+          assets=json.loads(gh('api',f"repos/{repo}/releases/{release['id']}/assets"))
+          actual=next(a for a in assets if a['name']==name)
+          assert actual['state']=='uploaded' and actual.get('digest')==digest,'Remote installer not verified'
+          print('Draft installer uploaded and verified; release remains unpublished')
+          PY
